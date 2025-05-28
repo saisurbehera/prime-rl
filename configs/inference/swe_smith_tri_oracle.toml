@@ -1,0 +1,10 @@
+model_name = "deepseek-ai/deepseek-coder-6.7b-base"
+dataset = "data/swe_smith_proper"
+batch_size = 32
+dp = 1
+tp = 2
+rollout_path = "outputs"
+output_path = "data_rollout"
+clean_output_path = true
+max_model_len = 2048
+enforce_eager = true

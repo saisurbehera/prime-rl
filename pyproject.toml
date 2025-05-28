@@ -10,22 +10,33 @@ dependencies = [
     "setuptools",
     "transformers>=4.51.0",
     "datasets>=3.0.0",
+    "pydantic_config @ git+https://github.com/samsja/pydantic_config.git@b7becc3",
     "torchdata>=0.8.0",
+    "ninja",
     "zstandard",
     "pyarrow",
     "wandb",
+    "vllm>=0.8.5",
     "jaxtyping",
     "beartype",
+    "toploc>=0.1.6",
+    "llmcompressor",
     "pylatexenc>=2.10",
+    "liger_kernel",
     "google-cloud-storage",
+    "shardcast >= 0.3.1",
+    "asyncio>=3.4.3",
     "aiohttp>=3.10.5",
+    "pyext @ git+https://github.com/justusmattern27/PyExt.git",
+    "prime-iroh>=0.2.1",
     "setuptools",
+    "reasoning-gym @ git+https://github.com/open-thought/reasoning-gym.git",
     "tomli>=2.2.1",
-    "pylint",
-    "flake8",
-    "radon",
-    "pytest",
+    "pandas>=2.2.3",
 ] 
+
+[project.optional-dependencies]
+fa = ["flash-attn>=2.7.4"]
 
 [build-system]
 requires = ["hatchling"]
@@ -43,6 +54,7 @@ ignore = ["F722", "F821"]
 
 [tool.uv]
 dev-dependencies = ["ruff>=0.5.0", "pre-commit>=3.0.0","pytest>=7.0.0", "faker"]
+no-build-isolation-package = ["flash-attn"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers"

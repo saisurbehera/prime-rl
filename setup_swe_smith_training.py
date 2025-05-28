@@ -251,10 +251,10 @@ class SWESmithDatasetProcessor:
         # Create statistics
         stats = {
             'total_samples': len(training_df),
-            'patch_generation_samples': len(training_df[training_df['task_type'] == 'swe_patch_generation']),
-            'step_execution_samples': len(training_df[training_df['task_type'] == 'swe_step_execution']),
-            'average_quality_score': training_df['quality_score'].mean(),
-            'unique_repositories': training_df['repo'].nunique() if 'repo' in training_df.columns else 0,
+            'patch_generation_samples': len(training_df[training_df['task_type'] == 'swe_patch_generation']) if len(training_df) > 0 and 'task_type' in training_df.columns else 0,
+            'step_execution_samples': len(training_df[training_df['task_type'] == 'swe_step_execution']) if len(training_df) > 0 and 'task_type' in training_df.columns else 0,
+            'average_quality_score': training_df['quality_score'].mean() if len(training_df) > 0 and 'quality_score' in training_df.columns else 0.0,
+            'unique_repositories': training_df['repo'].nunique() if len(training_df) > 0 and 'repo' in training_df.columns else 0,
         }
         
         stats_path = self.output_dir / "training_stats.json"
@@ -285,7 +285,17 @@ class SWESmithDatasetProcessor:
                 [prompt], [code]
             )
             
-            return feedback[0] if feedback else {'scores': {}, 'feedback': {}}
+            if feedback and len(feedback) > 0:
+                fb = feedback[0]
+                # Convert oracle_scores to expected format
+                scores = {}
+                feedback_text = {}
+                for oracle_name, data in fb.get('oracle_scores', {}).items():
+                    scores[oracle_name] = data.get('score', 0.0)
+                    feedback_text[oracle_name] = str(data.get('details', ''))
+                return {'scores': scores, 'feedback': feedback_text}
+            else:
+                return {'scores': {}, 'feedback': {}}
             
         except Exception as e:
             print(f"Error getting oracle feedback: {str(e)}")
