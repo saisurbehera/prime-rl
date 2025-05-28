@@ -2,90 +2,27 @@
 # This config trains on 50k+ instances with multi-oracle feedback vs. SWE-smith's single oracle
 
 # Base model - use same as SWE-smith for fair comparison
-model_id = "deepseek-ai/deepseek-coder-6.7b-base"  # Similar to their 32B model
-model_reference_id = "deepseek-ai/deepseek-coder-6.7b-base"
+model_name = "deepseek-ai/deepseek-coder-6.7b-base"
 
 # Training parameters optimized for SWE tasks
-batch_size = 16
-gradient_accumulation_steps = 4  # Effective batch size: 64
 temperature = 0.7
-lr = 2e-5
-max_steps = 10000
+wandb = true
+wandb_run_name = "swe-smith-enhanced-training"
+project = "tri-oracle-swe-smith"
+
+[data]
+path = "data/swe_smith_enhanced/tri_oracle_swe_training.parquet"
+seq_length = 2048
+
+[train]
+micro_bs = 16
+attn_impl = "sdpa"
+
+[optim]
+batch_size = 64
+total_steps = 10000
 warmup_steps = 500
 
-# Data configuration
-[data]
-data_path = "data/swe_smith_enhanced/tri_oracle_swe_training.parquet"
-seq_length = 2048  # Longer sequences for repository context
-train_test_split = 0.95
-
-# Oracle configuration - all oracles enabled for training
-use_execution_oracle = true
-use_static_oracle = true
-use_complexity_oracle = true
-use_documentation_oracle = true
-use_proof_oracle = true
-use_reflective_oracle = true
-
-# Oracle training settings
-oracle_loss_weight = 0.4  # 40% oracle feedback, 60% language modeling
-oracle_feedback_frequency = 0.8  # Use oracle feedback 80% of the time
-
-# Oracle uncertainty thresholds (lower = more oracle usage during training)
-execution_uncertainty_threshold = 0.3
-static_uncertainty_threshold = 0.4
-complexity_uncertainty_threshold = 0.5
-documentation_uncertainty_threshold = 0.5
-proof_uncertainty_threshold = 0.3
-reflective_uncertainty_threshold = 0.4
-
-# Oracle weights optimized for SWE-bench
-[oracle_weights]
-execution = 0.35      # Highest - test execution is critical
-proof = 0.25         # High - formal correctness important
-static_analysis = 0.15
-complexity = 0.10
-documentation = 0.10
-reflective = 0.05
-
-# Memory bank configuration
-memory_bank_enabled = true
-memory_bank_path = "swe_smith_memory.db"
-memory_update_frequency = 100
-memory_capacity = 100000
-
-# Training optimizations
-gradient_checkpointing = true
-mixed_precision = "fp16"
-dataloader_num_workers = 8
-
-# Evaluation during training
-eval_steps = 500
-eval_batch_size = 8
-eval_max_samples = 200
-
-# Logging and checkpointing
-log_steps = 50
-save_steps = 1000
-save_total_limit = 5
-
-# Environment settings
-[env]
-CUDA_VISIBLE_DEVICES = "0,1,2,3"  # Multi-GPU training
-WANDB_PROJECT = "tri-oracle-swe-smith"
-WANDB_RUN_NAME = "swe-smith-enhanced-training"
-
-# Specific optimizations for repository-level tasks
-enable_repo_context = true
-max_context_files = 10
-context_window = 1024
-
-# Advanced training features
-use_adversarial_curriculum = true
-curriculum_difficulty_ramp = 0.1  # Gradually increase task difficulty
-curriculum_update_frequency = 1000
-
-# MCTS integration during training (for hard examples)
-enable_mcts_training = true
-mcts_training_frequency = 0.1  # 10% of examples use MCTS refinement
-mcts_max_iterations = 3
+[optim.optim]
+lr = 2e-5
+weight_decay = 0.01

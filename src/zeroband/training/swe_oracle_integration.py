@@ -50,7 +50,7 @@ class SWEBenchOracle:
     def __init__(self, oracle_integration: OracleIntegration, memory_bank: Optional[MemoryBank] = None):
         self.oracle_integration = oracle_integration
         self.memory_bank = memory_bank
-        self.mcts_refiner = MCTSCodeRefiner()
+        self.mcts_refiner = MCTSCodeRefiner(oracle_integration.oracle_manager)
         
     def evaluate_patch(
         self, 
@@ -347,7 +347,7 @@ def create_swe_oracle_system(config_path: str = None) -> SWEBenchOracle:
     """Create a SWE-bench oracle system."""
     
     # Create oracle integration
-    oracle_integration = create_oracle_integration(config_path)
+    oracle_integration = create_oracle_integration()
     
     # Create memory bank for SWE-bench
     memory_bank = MemoryBank("swe_bench_memory.db")

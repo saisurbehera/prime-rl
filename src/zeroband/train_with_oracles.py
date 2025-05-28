@@ -113,9 +113,9 @@ def extract_code_from_completions(completions: List[str], tokenizer) -> List[str
         else:
             # Assume the whole completion is code
             code = completion.strip()
-        
+
         codes.append(code)
-    
+
     return codes
 
 
@@ -145,7 +145,7 @@ def train_with_oracles(config: Config):
         execution_uncertainty_threshold=getattr(config, "execution_uncertainty_threshold", 0.3),
         device="cuda"
     )
-    
+
     # Get model hidden dim from config or use default
     model_hidden_dim = getattr(config, "model_hidden_dim", 768)
     oracle_integration = create_oracle_integration(
@@ -157,26 +157,25 @@ def train_with_oracles(config: Config):
     oracle_loss_weight = getattr(config, "oracle_loss_weight", 0.3)
 
     # Allow eager fallback during production so that training runs don't die if compile fails
+    torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ  # type: ignore
     torch.set_float32_matmul_precision("high")
-    with envs.set_optional_torch_compile_eager_fallback():
-        torch.compile = torch.compile(dynamic=True, fullgraph=False)  # type: ignore
+    torch.manual_seed(42)
 
-    local_batch_size = get_local_batch_size(config.batch_size, config.train.micro_bs, config.data.num_workers, world_info)
+    torch.cuda.set_device(get_device_placement(config.gpus_ids, world_info))
+
+    local_batch_size = get_local_batch_size(config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info)
 
     # Setup model
-    assert config.model_id is not None, "Model ID must be provided"
-    model, tokenizer = get_model_and_tokenizer(config.model_id, config.rope_theta, use_fast=True)
-    model = model.to("cuda")
+    model, tokenizer = get_model_and_tokenizer(config.model_name, config.train.attn_impl)
 
     # Apply FSDP
     if world_info.world_size > 1:
-        apply_fsdp(model, reshard_after_forward=config.reshard_after_forward)
+        apply_fsdp(model, reshard_after_forward=config.train.reshard_after_forward)
 
     # Reference model for KL penalty
     tensors_offloaded_reference = None
     if config.kl_coef is not None:
-        assert config.model_reference_id is not None, "Model reference ID must be provided"
-        model_reference, _ = get_model_and_tokenizer(config.model_reference_id, config.rope_theta, use_fast=True)
+        model_reference, _ = get_model_and_tokenizer(config.model_name, config.train.attn_impl)
         model_reference = model_reference.to("cuda")
         if world_info.world_size > 1:
             apply_fsdp(model_reference, reshard_after_forward=True)
@@ -187,22 +186,22 @@ def train_with_oracles(config: Config):
     if oracle_integration.meta_gating_network is not None:
         # Include meta-gating network parameters in optimization
         params_group = list(model.parameters()) + list(oracle_integration.meta_gating_network.parameters())
-    
-    optimizer = torch.optim.AdamW(params_group, lr=config.lr, weight_decay=config.optim.weight_decay, eps=config.optim.eps)
+
+    optimizer = torch.optim.AdamW(params_group, lr=config.optim.optim.lr, weight_decay=config.optim.optim.weight_decay)
 
     # Training state
     training_progress = TrainingProgress(
+        total_tokens=0,
         step=0,
-        step_per_rollout=config.optim.step_per_rollout,
-        shard_offset=0,
-        epoch=0,
-        consumed_samples=0,
-        perf_counter=PerfCounter(world_info),
+        total_samples=0
     )
+
+    # Performance counter
+    perf_counter = PerfCounter(window_size=min(10, 2 * config.optim.step_per_rollout), model=model, seq_len=config.data.seq_length)
 
     # Load checkpoint if exists
     checkpoint_loaded = False
-    if config.ckpt.resumee:
+    if config.ckpt.resume is not None:
         checkpoint_loaded = load_checkpoint_fsdp_state(
             model=model,
             optimizer=optimizer,
@@ -215,21 +214,19 @@ def train_with_oracles(config: Config):
     # Initialize wandb
     if world_info.rank == 0 and config.wandb:
         wandb.init(
-            project=config.wandb_project,
-            entity=config.wandb_entity,
+            project=config.project,
+            entity=getattr(config, "wandb_entity", ""),
             name=config.wandb_run_name,
             config=config.model_dump(),
         )
 
     # Get dataloader
-    train_dataloader = get_dataloader(
-        config.data.data_path,
-        config.data.split,
-        config.data.seq_length,
-        local_batch_size,
-        config.data.num_workers,
-        prefetch_factor=2,
-        world_info=world_info,
+    train_dataloader, prefetcher = get_dataloader(
+        tokenizer=tokenizer,
+        local_batch_size=local_batch_size,
+        batch_size=config.optim.batch_size * config.optim.step_per_rollout,
+        data_config=config.data,
+        step_count_init=0,
     )
     train_dataloader_iterator = iter(train_dataloader)
 
@@ -289,15 +286,15 @@ def train_with_oracles(config: Config):
                     # Run oracle evaluation on completions (if available)
                     if "completions" in batch and batch["completions"]:
                         time_oracle_start = time.time()
-                        
+
                         # Extract code from completions
                         prompts = batch.get("prompts", [""] * len(batch["completions"]))
                         codes = extract_code_from_completions(batch["completions"], tokenizer)
-                        
+
                         # Get oracle feedback
                         feedback = oracle_integration.get_oracle_feedback_for_inference(prompts, codes)
                         oracle_feedback_batch.append(feedback)
-                        
+
                         total_time_oracles += time.time() - time_oracle_start
                     else:
                         oracle_feedback_batch.append(None)
@@ -356,7 +353,7 @@ def train_with_oracles(config: Config):
                     # Compute GRPO loss
                     input_ids_shifted = input_ids[:, 1:]
                     logits_shifted = logits[:, :-1, :] / config.temperature
-                    
+
                     loss = grpo_loss(
                         per_token_logps=batch["logprobs"].to(input_ids.device),
                         logits_shifted=logits_shifted,
@@ -387,7 +384,7 @@ def train_with_oracles(config: Config):
                     if oracle_feedback_per_batch[grad_acc_step] is not None and "completions" in batch:
                         prompts = batch.get("prompts", [""] * len(batch["completions"]))
                         codes = extract_code_from_completions(batch["completions"], tokenizer)
-                        
+
                         # Compute oracle losses with gradients
                         oracle_loss, oracle_metrics = oracle_integration.compute_oracle_losses(
                             prompts=prompts,
@@ -395,12 +392,12 @@ def train_with_oracles(config: Config):
                             hidden_states=hidden_states,
                             uncertainty_scores=None  # Will be calculated internally
                         )
-                        
+
                         # Add oracle loss to total loss
                         if oracle_loss is not None and oracle_loss.requires_grad:
                             loss = loss + oracle_loss_weight * oracle_loss
                             metric_averager.add("oracle_loss", oracle_loss.item())
-                            
+
                             # Add individual oracle metrics
                             for key, value in oracle_metrics.items():
                                 metric_averager.add(f"oracle/{key}", value)
@@ -417,15 +414,15 @@ def train_with_oracles(config: Config):
 
             # Optimizer step
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.optim.grad_clip)
-            
+
             # Also clip oracle network gradients if using meta-gating
             if oracle_integration.meta_gating_network is not None:
                 oracle_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    oracle_integration.meta_gating_network.parameters(), 
+                    oracle_integration.meta_gating_network.parameters(),
                     config.optim.grad_clip
                 )
                 metric_averager.add("oracle_grad_norm", oracle_grad_norm.item())
-            
+
             optimizer.step()
             optimizer.zero_grad()
 
@@ -445,16 +442,16 @@ def train_with_oracles(config: Config):
             # Log metrics
             metric_averager.add("grad_norm", grad_norm.item())
             training_progress.step += 1
-            training_progress.consumed_samples += local_batch_size * world_info.world_size
+            training_progress.total_samples += local_batch_size * world_info.world_size
 
             # Log to wandb
-            if world_info.rank == 0 and config.wandb and training_progress.step % config.log_interval == 0:
+            if world_info.rank == 0 and config.wandb and training_progress.step % getattr(config, 'log_interval', 50) == 0:
                 log_to_wandb(
                     {
                         **metric_averager.metrics(),
                         "step": training_progress.step,
-                        "consumed_samples": training_progress.consumed_samples,
-                        "time_per_step": training_progress.perf_counter.get_perf_since_last_log(),
+                        "total_samples": training_progress.total_samples,
+                        "time_per_step": perf_counter.get_perf_since_last_log(),
                     }
                 )
 
@@ -485,5 +482,5 @@ def train_with_oracles(config: Config):
 
 
 if __name__ == "__main__":
-    config = parse_argv(Config)
+    config = Config(**parse_argv())
     train_with_oracles(config)
