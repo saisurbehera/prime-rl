@@ -1,12 +1,13 @@
-import pickle
 import time
 from functools import partial
 from typing import Tuple
 
+import msgspec
 import torch
 import torch.nn as nn
 from prime_iroh import Node
 from pydantic_config import BaseConfig
+from safetensors.torch import load, save
 from vllm import LLM
 from vllm.model_executor.layers.sampler import SamplerOutput
 
@@ -24,6 +25,29 @@ class PipelineConfig(BaseConfig):
     world_size: int = 1
     iroh_seed: int | None = None
     iroh_peer_id: str | None = None
+
+
+def serialize_tensors(tensor_dict: dict[str, torch.Tensor]) -> bytes:
+    """Safely serializes a dictionary of tensors to bytes."""
+    return save(tensor_dict)
+
+
+def deserialize_tensors(data: bytes, device: torch.device | None = None) -> dict[str, torch.Tensor]:
+    """Safely deserializes a dictionary of tensors from bytes."""
+    tensor_dict = load(data)
+    if device is not None:
+        return {key: tensor.to(device) for key, tensor in tensor_dict.items()}
+    return tensor_dict
+
+
+def serialize_sampler_output(output: SamplerOutput) -> bytes:
+    """Safely serializes a vLLM SamplerOutput object"""
+    return msgspec.json.encode(output)
+
+
+def deserialize_sampler_output(data: bytes) -> SamplerOutput:
+    """Safely deserializes a vLLM SamplerOutput object"""
+    return msgspec.json.decode(data, type=SamplerOutput)
 
 
 def setup_pipeline(llm: LLM, rank: int, world_size: int, iroh_seed: int | None = None, iroh_peer_id: str | None = None) -> Node:
@@ -150,13 +174,9 @@ def send_intermediate_states(_, __, output: Tuple, node: Node) -> None:
         node: The node that is being hooked
     """
     hidden_states, residual = output
-    serialized_hidden_states = pickle.dumps(hidden_states.to("cpu"))
-    serialized_residual = pickle.dumps(residual.to("cpu"))
-    node.isend(serialized_hidden_states, tag=0, latency=None).wait()
-    node.isend(serialized_residual, tag=0, latency=None).wait()
-    logger.debug(
-        f"Sent hidden_states and residual ({hidden_states.shape}, {residual.shape}) ({len(serialized_hidden_states) + len(serialized_residual)} bytes)"
-    )
+    serialized_tensors = serialize_tensors({"hidden_states": hidden_states, "residual": residual})
+    node.isend(serialized_tensors, tag=0, latency=None).wait()
+    logger.debug(f"Sent hidden_states and residual ({hidden_states.shape}, {residual.shape}) ({len(serialized_tensors)} bytes)")
 
 
 def recv_intermediate_states(_, input: Tuple, node: Node) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -172,13 +192,11 @@ def recv_intermediate_states(_, input: Tuple, node: Node) -> Tuple[torch.Tensor,
     """
     positions, _, _ = input
     device = positions.device
-    serialized_hidden_states = node.irecv(tag=0).wait()
-    serialized_residual = node.irecv(tag=0).wait()
-    hidden_states = pickle.loads(serialized_hidden_states).to(device)
-    residuals = pickle.loads(serialized_residual).to(device)
-    logger.debug(
-        f"Got hidden_states and residuals ({hidden_states.shape}, {residuals.shape}) ({len(serialized_hidden_states) + len(serialized_residual)} bytes)"
-    )
+    serialized_tensors = node.irecv(tag=0).wait()
+    deserialized_tensors = deserialize_tensors(serialized_tensors, device)
+    hidden_states = deserialized_tensors["hidden_states"]
+    residuals = deserialized_tensors["residual"]
+    logger.debug(f"Got hidden_states and residuals ({hidden_states.shape}, {residuals.shape}) ({len(serialized_tensors)} bytes)")
 
     return positions, hidden_states, residuals
 
@@ -207,7 +225,7 @@ def recv_output(_, __, output, node: Node, relay=False) -> SamplerOutput:
     if relay:
         node.isend(serialized_output, tag=0, latency=None).wait()
         logger.debug(f"Sent outputs ({len(serialized_output)} bytes)")
-    output = pickle.loads(serialized_output)
+    output = deserialize_sampler_output(serialized_output)
     return output
 
 
@@ -221,6 +239,6 @@ def send_output(_, __, output: SamplerOutput, node: Node) -> None:
         output: The outputs of the module
         node: The node class instances for communication
     """
-    serialized_output = pickle.dumps(output)
+    serialized_output = serialize_sampler_output(output)
     node.isend(serialized_output, tag=0, latency=None).wait()
     logger.debug(f"Sent outputs ({len(serialized_output)} bytes)")
