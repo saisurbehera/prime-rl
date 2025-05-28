@@ -30,6 +30,9 @@ dependencies = [
     "pyext @ git+https://github.com/justusmattern27/PyExt.git",
     "prime-iroh>=0.2.1",
     "setuptools",
+    "fastapi",
+    "uvicorn",
+    "requests",
     "reasoning-gym @ git+https://github.com/open-thought/reasoning-gym.git",
     "tomli>=2.2.1",
 ] 

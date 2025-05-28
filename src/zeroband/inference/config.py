@@ -4,7 +4,7 @@ from pydantic import model_validator
 from pydantic_config import BaseConfig
 
 from zeroband.inference.pipeline import PipelineConfig
-from zeroband.inference.rewards import LenRewardsConfig
+from zeroband.inference.rewards import RewardsConfig
 
 
 class SamplingParamConfig(BaseConfig):
@@ -61,7 +61,7 @@ class Config(BaseConfig):
 
     toploc: bool = False
 
-    len_reward: LenRewardsConfig | None = None
+    rewards: RewardsConfig = RewardsConfig()
     difficulty_filtering: DifficultyFilteringConfig | None = None
 
     max_prompt_len: int | None = None

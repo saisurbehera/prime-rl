@@ -23,9 +23,11 @@ from vllm import LLM, SamplingParams
 from zeroband.inference.config import Config
 from zeroband.inference.parquet import get_parquet_table
 from zeroband.inference.pipeline import setup_pipeline
-from zeroband.inference.rewards import compute_rewards
+from zeroband.inference.rewards import compute_vllm_rewards
 from zeroband.inference.toploc import setup_toploc_cache
 from zeroband.inference.utils import fake_chat_template, filter_data_by_prompt_length, generate_target_length_prompts, reload_model_weights
+
+
 from zeroband.training.mp import EnvWrapper
 from zeroband.utils.logger import get_logger
 from zeroband.utils.metrics import PrimeMetric
@@ -193,15 +195,16 @@ def inference(config: Config):
 
         messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
 
-        length_prompt_additions, target_lengths = generate_target_length_prompts(config.len_reward, len(batch))
         # Assume verification_info is stored as a JSON string in the dataset.
         verification_infos = [json.loads(item["verification_info"]) for item in batch]
-        for target_length, verification_info in zip(target_lengths, verification_infos):
-            verification_info["target_length"] = target_length
         task_types = [item["task_type"] for item in batch]
 
-        if config.len_reward:
-            if config.len_reward.length_prompt_location == "system_prompt":
+        len_reward = config.rewards.len_reward
+        length_prompt_additions, target_lengths = generate_target_length_prompts(len_reward, len(batch))
+        for target_length, verification_info in zip(target_lengths, verification_infos):
+            verification_info["target_length"] = target_length
+        if len_reward:
+            if len_reward.length_prompt_location == "system_prompt":
                 messages = [
                     [
                         {"role": "system", "content": length_prompt},
@@ -218,7 +221,7 @@ def inference(config: Config):
         else:
             messages = [
                 [{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}]
-                for item, length_prompt in zip(batch, length_prompt_additions)
+                for item in batch
             ]
 
         if tokenizer.chat_template:
@@ -271,7 +274,7 @@ def inference(config: Config):
 
         # Compute rewards and advantages
         start = time.time()
-        request_rewards = compute_rewards(request_outputs, verification_infos, task_types, config.len_reward)
+        request_rewards = compute_vllm_rewards(request_outputs, verification_infos, task_types, config.rewards)
         logger.info(f"Computed rewards and advantages in {time.time() - start:.2f}s")
 
         table = get_parquet_table(
