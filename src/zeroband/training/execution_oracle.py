@@ -215,36 +215,23 @@ class ExecutionOracle(Oracle):
         else:
             pooled_hidden = hidden_states
         
-        # Get predictions for each test
-        predicted_probs = []
-        actual_results = []
-        
-        for result in execution_results:
-            # For simplicity, use the same hidden state for all tests
-            # In practice, you might want test-specific features
-            pred = self.test_predictor(pooled_hidden)
-            predicted_probs.append(pred.squeeze(-1))  # Ensure proper shape
-            actual_results.append(float(result.passed))
-        
-        # Stack tensors
-        if predicted_probs:
-            predicted_probs = torch.stack(predicted_probs)
-            actual_results = torch.tensor(
-                actual_results, 
-                dtype=torch.float32, 
-                device=self.device
-            )
+        # Use a simple aggregate approach for now
+        # In practice, you'd want more sophisticated test-specific features
+        num_tests = len(execution_results)
+        if num_tests > 0:
+            # Get a single prediction for the overall test pass rate
+            overall_pred = self.test_predictor(pooled_hidden).squeeze()
             
-            # Ensure same shape
-            if predicted_probs.dim() > 1:
-                predicted_probs = predicted_probs.mean(dim=0)  # Average over tests
+            # If we have multiple samples in batch, average them
+            if overall_pred.dim() > 0:
+                overall_pred = overall_pred.mean()
             
-            # Binary cross-entropy loss
-            execution_loss = F.binary_cross_entropy(
-                predicted_probs, 
-                actual_results,
-                reduction='mean'
-            )
+            # Actual pass rate
+            actual_pass_rate = sum(1 for r in execution_results if r.passed) / num_tests
+            actual_pass_rate = torch.tensor(actual_pass_rate, dtype=torch.float32, device=self.device)
+            
+            # MSE loss on pass rate
+            execution_loss = F.mse_loss(overall_pred, actual_pass_rate)
         else:
             execution_loss = torch.tensor(0.0, requires_grad=True, device=self.device)
         

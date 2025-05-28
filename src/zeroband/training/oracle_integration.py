@@ -15,6 +15,8 @@ from .execution_oracle import ExecutionOracle
 from .static_analysis_oracle import StaticAnalysisOracle
 from .complexity_oracle import ComplexityOracle
 from .documentation_oracle import DocumentationOracle
+from .proof_oracle import ProofOracle
+from .reflective_oracle import ReflectiveOracle
 
 
 @dataclass
@@ -130,6 +132,18 @@ class OracleIntegration:
             self.oracle_manager.register_oracle(
                 "documentation",
                 DocumentationOracle(oracle_configs)
+            )
+            
+        if self.config.use_proof_oracle:
+            self.oracle_manager.register_oracle(
+                "proof",
+                ProofOracle(oracle_configs)
+            )
+            
+        if self.config.use_reflective_oracle:
+            self.oracle_manager.register_oracle(
+                "reflective",
+                ReflectiveOracle(oracle_configs)
             )
     
     def compute_oracle_losses(

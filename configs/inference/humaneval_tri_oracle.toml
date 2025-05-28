@@ -1,0 +1,34 @@
+# Tri-Oracle inference configuration for HumanEval
+
+# Model settings
+model_name = "deepseek-ai/deepseek-coder-1.3b-base"
+rollout_model_name = ""
+
+# Generation settings
+task = "humaneval"
+prompts_path = "humaneval_prompts.jsonl"
+output_dir = "humaneval_output"
+batch_size = 32
+dp = 1
+pp.rank = 0
+pp.world_size = 1
+temperature = 0.2  # Lower temperature for code generation
+max_tokens = 512
+seed = 42
+
+# vLLM settings
+tensor_parallel_size = 1
+num_steps = 164  # Number of HumanEval problems
+num_generations = 5  # Multiple solutions per problem
+
+# Oracle evaluation during inference
+evaluate_with_oracles = true
+save_oracle_scores = true
+
+# Code generation specific
+stop_sequences = ["\ndef ", "\nclass ", "\n#", "\n\n\n"]
+
+# MCTS refinement (optional)
+use_mcts_refinement = false
+mcts_iterations = 20
+target_improvements = ["execution", "complexity"]

@@ -1,0 +1,76 @@
+# Tri-Oracle training configuration for HumanEval
+
+# Model settings
+model_id = "deepseek-ai/deepseek-coder-1.3b-base"  # Good for code
+model_reference_id = "deepseek-ai/deepseek-coder-1.3b-base"
+
+# Training parameters
+batch_size = 32
+temperature = 0.8
+lr = 2e-5
+warmup_steps = 100
+total_steps = 5000
+min_lr = 2e-6
+lr_schedule = "cosine"
+warmup_ratio = 0.1
+
+# Optimizer settings
+[optim]
+weight_decay = 0.01
+eps = 1e-8
+grad_clip = 1.0
+step_per_rollout = 1
+
+# Training settings
+[train]
+micro_bs = 4
+seq_per_sample = 1
+memory_profile = false
+
+# Data settings
+[data]
+data_path = "humaneval_train.parquet"
+split = "train"
+seq_length = 1024
+num_workers = 4
+
+# Logging
+log_interval = 10
+wandb = true
+wandb_project = "tri-oracle-humaneval"
+wandb_entity = ""
+wandb_run_name = "humaneval-all-oracles"
+
+# Checkpointing
+[ckpt]
+path = "checkpoints/humaneval_tri_oracle"
+rollout_path = "checkpoints/humaneval_rollout"
+interval = 500
+rollout_interval = 250
+resumee = false
+clean_rollout_path = true
+
+# Loss coefficients
+kl_coef = 0.05
+clip_coef = 0.2
+entropy_coef = 0.001
+
+# Oracle settings - ALL ENABLED
+use_execution_oracle = true
+use_static_oracle = true
+use_complexity_oracle = true
+use_documentation_oracle = true
+use_proof_oracle = true
+use_reflective_oracle = true
+
+# Oracle integration
+use_meta_gating = true
+oracle_loss_weight = 0.5  # Higher weight for HumanEval
+execution_uncertainty_threshold = 0.2  # Run execution oracle more often
+proof_uncertainty_threshold = 0.4
+model_hidden_dim = 1024  # deepseek-coder hidden dim
+
+# HumanEval specific
+rope_theta = 10000.0
+reshard_after_forward = false
+collate_mode = "standard"
