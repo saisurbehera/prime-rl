@@ -1,0 +1,62 @@
+# Tri-Oracle configuration optimized for SWE-bench Verified
+# Model settings - using a strong code model
+model_name = "deepseek-ai/deepseek-coder-6.7b-instruct"
+rollout_model_name = ""
+
+# Generation settings optimized for patches
+task = "swe_bench"
+prompts_path = "data/swe_bench/swe_bench_prompts.jsonl"
+output_dir = "swe_bench_output"
+max_new_tokens = 1024
+temperature = 0.7
+top_p = 0.95
+do_sample = true
+
+# Oracle configuration for SWE-bench
+use_execution_oracle = true
+use_static_oracle = true
+use_complexity_oracle = true  
+use_documentation_oracle = true
+use_proof_oracle = true
+use_reflective_oracle = true
+
+# SWE-bench specific oracle settings
+[oracle_config]
+# Run oracles more aggressively for SWE-bench
+execution_uncertainty_threshold = 0.1  # Run execution oracle almost always
+static_uncertainty_threshold = 0.2
+complexity_uncertainty_threshold = 0.3
+documentation_uncertainty_threshold = 0.4
+proof_uncertainty_threshold = 0.2
+reflective_uncertainty_threshold = 0.3
+
+# Weight execution and proof oracles more heavily for SWE-bench
+oracle_weights = {
+    execution = 0.3,     # High weight for test execution
+    static_analysis = 0.15,
+    complexity = 0.1,
+    documentation = 0.1,
+    proof = 0.25,        # High weight for formal correctness
+    reflective = 0.1
+}
+
+# Repository analysis settings
+enable_repo_context = true
+max_context_files = 20
+context_window_size = 8192
+
+# MCTS refinement settings
+enable_mcts_refinement = true
+mcts_max_iterations = 5
+mcts_exploration_constant = 1.414
+mcts_max_depth = 3
+
+# Memory bank settings
+memory_bank_enabled = true
+memory_bank_path = "swe_bench_memory.db"
+memory_similarity_threshold = 0.8
+
+# Evaluation settings
+batch_size = 1  # Process one instance at a time for SWE-bench
+save_intermediate_results = true
+result_save_interval = 10
