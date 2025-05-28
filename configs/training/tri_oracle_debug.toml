@@ -1,0 +1,75 @@
+# Tri-Oracle training configuration for debug runs
+
+# Base configuration
+model_id = "Qwen/Qwen2.5-0.5B"
+model_reference_id = "Qwen/Qwen2.5-0.5B"  # Same model for KL reference
+
+# Training parameters
+batch_size = 16
+temperature = 0.8
+lr = 5e-5
+warmup_steps = 10
+total_steps = 1000
+min_lr = 5e-6
+lr_schedule = "cosine"
+warmup_ratio = 0.1
+
+# Optimizer settings
+[optim]
+weight_decay = 0.0
+eps = 1e-8
+grad_clip = 1.0
+step_per_rollout = 1
+
+# Training settings
+[train]
+micro_bs = 4
+seq_per_sample = 1
+memory_profile = false
+
+# Data settings
+[data]
+data_path = "output.parquet"
+split = "train"
+seq_length = 512
+num_workers = 0  # Single worker for debug
+
+# Logging
+log_interval = 1
+wandb = false
+wandb_project = "tri-oracle-debug"
+wandb_entity = ""
+wandb_run_name = "debug-run"
+
+# Checkpointing
+[ckpt]
+path = "checkpoints/tri_oracle_debug"
+rollout_path = "checkpoints/tri_oracle_rollout"
+interval = 100
+rollout_interval = 50
+resumee = false
+clean_rollout_path = true
+
+# Loss coefficients
+kl_coef = 0.1
+clip_coef = 0.2
+entropy_coef = 0.01
+
+# Oracle-specific settings
+use_execution_oracle = true
+use_static_oracle = true
+use_complexity_oracle = true
+use_documentation_oracle = true
+use_proof_oracle = false
+use_reflective_oracle = false
+
+# Oracle integration
+use_meta_gating = true
+oracle_loss_weight = 0.3
+execution_uncertainty_threshold = 0.3
+model_hidden_dim = 768  # Qwen2.5-0.5B hidden dim
+
+# Additional settings
+rope_theta = 10000.0
+reshard_after_forward = false
+collate_mode = "standard"

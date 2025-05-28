@@ -1,0 +1,30 @@
+# Tri-Oracle inference configuration for debug runs
+
+# Model settings
+model_name = "Qwen/Qwen2.5-0.5B"
+rollout_model_name = ""  # Empty for single model setup
+
+# Generation settings
+task = "code_generation"  # Custom task for code generation
+prompts_path = "data/code_prompts.jsonl"  # Path to code generation prompts
+output_dir = "output"
+batch_size = 16
+dp = 1
+pp.rank = 0
+pp.world_size = 1
+temperature = 0.8
+max_tokens = 512
+seed = 42
+
+# vLLM settings
+tensor_parallel_size = 1
+num_steps = 100
+num_generations = 1  # Number of completions per prompt
+
+# Oracle evaluation during inference
+evaluate_with_oracles = true
+save_oracle_scores = true
+
+# Additional settings for code generation
+include_code_tags = true  # Wrap code in ```python tags
+stop_sequences = ["```", "\n\n\n", "# End"]
