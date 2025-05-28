@@ -25,12 +25,10 @@ from zeroband.inference.parquet import get_parquet_table
 from zeroband.inference.pipeline import setup_pipeline
 from zeroband.inference.rewards import compute_vllm_rewards
 from zeroband.inference.toploc import setup_toploc_cache
+from zeroband.utils.monitor import setup_monitor
 from zeroband.inference.utils import fake_chat_template, filter_data_by_prompt_length, generate_target_length_prompts, reload_model_weights
-
-
 from zeroband.training.mp import EnvWrapper
 from zeroband.utils.logger import get_logger
-from zeroband.utils.metrics import PrimeMetric
 
 # Global logger
 logger = get_logger("INFER")
@@ -46,11 +44,11 @@ def inference(config: Config):
     logger.info(f"Parallelism: TP={config.tp}, DP={config.dp}, PP={config.pp.world_size}")
 
     if config.clean_output_path and config.output_path is not None:
-        logger.debug(f"Cleaning output path {config.output_path}")
+        logger.info(f"Cleaning output path {config.output_path}")
         shutil.rmtree(config.output_path, ignore_errors=True)
 
     # Initialize metrics
-    prime_metric = PrimeMetric(disable=config.prime_log_freq is None, period=config.prime_log_freq)
+    monitor = setup_monitor(config.monitor)
 
     # Initialize vLLM and get tokenizer
     logger.info(
@@ -85,12 +83,12 @@ def inference(config: Config):
     logger.info(f"Loaded dataset {config.dataset} with {len(dataset):,} problems")
 
     # Optionally shuffle dataset
-    if envs.GROUP_ID is not None:
+    if envs.PRIME_GROUP_ID is not None:
         # We dont shuffle here because we shuffle reproducibly in the sampling loop.
-        assert config.seed is None, "Seed is not supported when GROUP_ID is set"
-        assert os.environ.get("DP_RANK") is None, "DP is not supported when GROUP_ID is set"
-        node_address_int = int(envs.GROUP_ID, 16)
-        logger.info(f"Seeding with {node_address_int} ({envs.GROUP_ID})")
+        assert config.seed is None, "Seed is not supported when PRIME_GROUP_ID is set"
+        assert os.environ.get("DP_RANK") is None, "DP is not supported when PRIME_GROUP_ID is set"
+        node_address_int = int(envs.PRIME_GROUP_ID, 16)
+        logger.info(f"Seeding with {node_address_int} ({envs.PRIME_GROUP_ID})")
     else:
         # Seed the dataset with a random number
         seed = config.seed + int(os.environ.get("DP_RANK", 0)) if config.seed is not None else None
@@ -219,10 +217,7 @@ def inference(config: Config):
                     for item, length_prompt in zip(batch, length_prompt_additions)
                 ]
         else:
-            messages = [
-                [{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}]
-                for item in batch
-            ]
+            messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
 
         if tokenizer.chat_template:
             prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
@@ -245,24 +240,40 @@ def inference(config: Config):
         # We call here to give time for the proofs to be generated non-blocking in the background.
         toploc_cache.maybe_generate_proofs_in_background(force_generate=True)
 
-        # Calculate batch problems, samples and tokens
+        # Compute progress metrics
         batch_problems = len(batch)
         batch_samples = sum(len(req.outputs) for req in request_outputs)
         batch_input_tokens = sum(len(req.prompt_token_ids) for req in request_outputs)
         batch_output_tokens = sum(sum(len(output.token_ids) for output in req.outputs) for req in request_outputs)
         batch_tokens = batch_input_tokens + batch_output_tokens
-        # Calculate overall problems, samples and tokens
         total_tokens += batch_tokens
         total_problems += batch_problems
         total_samples += batch_samples
         logger.info(f"Generated {batch_samples} samples for {batch_problems} problems for step {real_step} in {end_time - start_time:.2f}s")
 
-        # Compute batch throughput and average sequence length
-        batch_throughput = batch_tokens / (end_time - start_time)
-        avg_sequence_length = batch_tokens / num_batch_samples
+        # Log progress metrics
+        progress_metrics = {
+            "progress/batch_problems": batch_problems,
+            "progress/batch_samples": batch_samples,
+            "progress/batch_tokens": batch_tokens,
+        }
+        monitor.log(progress_metrics)
+
+        # Compute performance metrics
+        batch_tokens_per_second = batch_tokens / (end_time - start_time)
+        batch_samples_per_minute = batch_samples / (end_time - start_time) * 60
+        batch_avg_seq_length = batch_tokens / num_batch_samples
         logger.info(
-            f"Batch throughput: {batch_throughput:.2f} tok/sec ({batch_tokens} tokens in {end_time - start_time:.2f}s, avg seq len: {avg_sequence_length:.1f})"
+            f"Batch throughput: {batch_tokens_per_second:.2f} tokens/sec, {batch_samples_per_minute:.2f} samples/min ({batch_tokens} tokens in {end_time - start_time:.2f}s, avg seq len: {batch_avg_seq_length:.1f})"
         )
+
+        # Log performance metrics
+        perf_metrics = {
+            "performance/batch_tokens_per_second": batch_tokens_per_second,
+            "performance/batch_samples_per_minute": batch_samples_per_minute,
+            "performance/batch_avg_seq_length": batch_avg_seq_length,
+        }
+        monitor.log(perf_metrics)
 
         # Compute proofs
         # Note (Jack): Currently, vllm guarantees that seq ids are in the same order as prompts passed to generate.
@@ -277,6 +288,7 @@ def inference(config: Config):
         request_rewards = compute_vllm_rewards(request_outputs, verification_infos, task_types, config.rewards)
         logger.info(f"Computed rewards and advantages in {time.time() - start:.2f}s")
 
+        # Get parquet table
         table = get_parquet_table(
             request_outputs,
             request_rewards,
@@ -285,17 +297,16 @@ def inference(config: Config):
             target_lengths,
         )
 
+        # Save outputs to parquet file
         step_path = Path(config.output_path) / f"step_{real_step}"
-        os.makedirs(step_path, exist_ok=True)
-        pq_save_path = f"{step_path}/{uuid.uuid4()}.parquet"
-        pq.write_table(table, pq_save_path)
-        logger.info(f"Saved batch outputs to {pq_save_path}")
+        step_path.mkdir(parents=True, exist_ok=True)
+        save_path = step_path / f"{uuid.uuid4()}.parquet"
+        pq.write_table(table, save_path)
+        logger.info(f"Saved batch outputs to {save_path}")
 
-        file_sha = sha256sum(pq_save_path)
-        prime_metric.log_prime({"file_sha": file_sha, "file_name": pq_save_path})
-
-        metric = {"dashbord-progress/total": total_problems, f"dashbord-progress/{config.dataset}": total_tokens}
-        prime_metric.log_prime(metric)
+        # Log file metadata
+        sha256 = sha256sum(save_path)
+        monitor.log({"output/save_path": save_path.as_posix(), "output/sha256": sha256})
 
         real_step += 1
 

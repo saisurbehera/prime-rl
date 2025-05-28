@@ -6,7 +6,7 @@ from zeroband.utils.envs import _ENV_PARSERS as _BASE_ENV_PARSERS, get_env_value
 if TYPE_CHECKING:
     # Enable type checking for shared envs
     # ruff: noqa
-    from zeroband.utils.envs import PRIME_LOG_LEVEL, CUDA_VISIBLE_DEVICES
+    from zeroband.utils.envs import *
 
     # vLLM
     VLLM_USE_V1: str
@@ -19,15 +19,11 @@ if TYPE_CHECKING:
     SHARDCAST_SERVERS: List[str] | None = None
     SHARDCAST_BACKLOG_VERSION: int = -1
 
-    # Protocol
-    GROUP_ID: str | None = None
-
 _INFERENCE_ENV_PARSERS = {
     "VLLM_USE_V1": str,
     "VLLM_CONFIGURE_LOGGING": str,
     "SHARDCAST_SERVERS": lambda x: x.split(","),
     "SHARDCAST_BACKLOG_VERSION": int,
-    "GROUP_ID": str,
     "RUST_LOG": str,
     **_BASE_ENV_PARSERS,
 }
