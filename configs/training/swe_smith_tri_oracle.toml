@@ -1,28 +1,35 @@
 # Tri-Oracle training configuration for SWE-smith enhanced dataset
 # This config trains on 50k+ instances with multi-oracle feedback vs. SWE-smith's single oracle
 
-# Base model - use same as SWE-smith for fair comparison
-model_name = "deepseek-ai/deepseek-coder-6.7b-base"
+# Base model - using smaller model for memory constraints
+model_name = "Qwen/Qwen2.5-Coder-1.5B"
 
 # Training parameters optimized for SWE tasks
 temperature = 0.7
 wandb = true
 wandb_run_name = "swe-smith-enhanced-training"
 project = "tri-oracle-swe-smith"
+# kl_coef = 0.0  # Disabled to save memory
+
 
 [data]
-path = "data/swe_smith_enhanced/tri_oracle_swe_training.parquet"
-seq_length = 2048
+path = "swe_bench_outputs"
+seq_length = 1024
 
 [train]
-micro_bs = 16
+micro_bs = 1
 attn_impl = "sdpa"
 
 [optim]
-batch_size = 64
+batch_size = 16
 total_steps = 10000
 warmup_steps = 500
+step_per_rollout = 4
 
 [optim.optim]
 lr = 2e-5
 weight_decay = 0.01
+
+[ckpt]
+rollout_path = "swe_bench_rollouts"
+clean_rollout_path = true
