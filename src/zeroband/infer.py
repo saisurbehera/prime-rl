@@ -16,17 +16,24 @@ import requests
 import torch
 import torch.distributed as dist
 from datasets import load_dataset
+from prime_iroh import Node
 from pydantic_config import parse_argv
 from toploc.utils import sha256sum
 from vllm import LLM, SamplingParams
 
 from zeroband.inference.config import Config
 from zeroband.inference.parquet import get_parquet_table
-from zeroband.inference.pipeline import setup_pipeline
+from zeroband.inference.pipeline import all_reduce, setup_pipeline
 from zeroband.inference.rewards import compute_vllm_rewards
 from zeroband.inference.toploc import setup_toploc_cache
 from zeroband.utils.monitor import setup_monitor
-from zeroband.inference.utils import fake_chat_template, filter_data_by_prompt_length, generate_target_length_prompts, reload_model_weights
+from zeroband.inference.utils import (
+    fake_chat_template,
+    filter_data_by_prompt_length,
+    generate_target_length_prompts,
+    reload_model_weights,
+    compute_max_batch_size,
+)
 from zeroband.training.mp import EnvWrapper
 from zeroband.utils.logger import get_logger
 
@@ -69,8 +76,21 @@ def inference(config: Config):
     sampling_params = SamplingParams(**config.sampling.model_dump())
 
     # Create communication for pipeline
+    node: Node | None = None
     if config.pp.world_size > 1:
-        setup_pipeline(config=config.pp, llm=llm)
+        node = setup_pipeline(config=config.pp, llm=llm)
+
+    # Compute the maximum batch size
+    batch_size = config.batch_size
+    if batch_size == "auto":
+        # Automatically compute the maximum batch size
+        local_batch_size = compute_max_batch_size(llm)
+        batch_size = all_reduce(node, torch.tensor(local_batch_size), config=config.pp, op=torch.min).item()
+        logger.info(f"Auto-computed batch size: {batch_size}")
+
+    # Throw an error if the batch size is too small for the number of samples to generate per problem
+    if config.sampling.n > batch_size:
+        raise ValueError(f"Sampling.n ({config.sampling.n}) must be less than or equal to batch_size ({batch_size})")
 
     # Load  dataset
     dataset = load_dataset(config.dataset, split="train")
@@ -106,12 +126,11 @@ def inference(config: Config):
         )
 
     # Setup TOPLOC
-    num_batch_samples = config.batch_size * config.sampling.n
     hidden_size = llm.llm_engine.model_executor.driver_worker.model_runner.model.config.hidden_size
     toploc_cache, _ = setup_toploc_cache(
         llm,
         disable=not config.toploc,
-        max_seqs=num_batch_samples,
+        max_seqs=batch_size,
         hidden_size=hidden_size,
     )
 
@@ -133,9 +152,14 @@ def inference(config: Config):
     total_problems = 0
     total_samples = 0
     total_tokens = 0
-    max_samples = config.max_samples or len(dataset)
 
-    for i in range(0, min(len(dataset), max_samples), config.batch_size):
+    # Compute the maximum number of problems and problems per batch
+    problems_per_batch = batch_size // config.sampling.n
+    logger.info(
+        f"Problems per batch: {batch_size} // {config.sampling.n} = {problems_per_batch} (missing: {batch_size % config.sampling.n})"
+    )
+
+    for i in range(0, config.max_samples or len(dataset), batch_size):
         if config.step_endpoint is not None:
             # We get the step from the endpoint at the start of each batch to know what to work on
             try:
@@ -178,21 +202,21 @@ def inference(config: Config):
             # We reseed the generator here to make the sampling reproducible at each step.
             # This would work even if the node restarts and resumes from the current step.
             generator = np.random.default_rng(node_address_int * current_step_batch_counter + real_step)
-            indices = generator.integers(0, len(dataset), config.batch_size)
+            indices = generator.integers(0, len(dataset), problems_per_batch)
         else:
-            indices = list(range(i, min(i + config.batch_size, len(dataset))))
+            indices = list(range(i, min(i + problems_per_batch, len(dataset))))
 
         logger.debug(f"Sampling batch with indices [{' '.join(map(str, indices[:3]))}...{' '.join(map(str, indices[-3:]))}]")
-        batch = dataset.select(indices)
+        problems = dataset.select(indices)
 
-        messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
+        messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in problems]
 
         # Assume verification_info is stored as a JSON string in the dataset.
-        verification_infos = [json.loads(item["verification_info"]) for item in batch]
-        task_types = [item["task_type"] for item in batch]
+        verification_infos = [json.loads(item["verification_info"]) for item in problems]
+        task_types = [item["task_type"] for item in problems]
 
         len_reward = config.rewards.len_reward
-        length_prompt_additions, target_lengths = generate_target_length_prompts(len_reward, len(batch))
+        length_prompt_additions, target_lengths = generate_target_length_prompts(len_reward, len(problems))
         for target_length, verification_info in zip(target_lengths, verification_infos):
             verification_info["target_length"] = target_length
         if len_reward:
@@ -203,15 +227,15 @@ def inference(config: Config):
                         {"role": "user", "content": item["prompt"]},
                         {"role": "assistant", "content": "<think>\n"},
                     ]
-                    for item, length_prompt in zip(batch, length_prompt_additions)
+                    for item, length_prompt in zip(problems, length_prompt_additions)
                 ]
             else:
                 messages = [
                     [{"role": "user", "content": item["prompt"] + length_prompt}, {"role": "assistant", "content": "<think>\n"}]
-                    for item, length_prompt in zip(batch, length_prompt_additions)
+                    for item, length_prompt in zip(problems, length_prompt_additions)
                 ]
         else:
-            messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
+            messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in problems]
 
         if tokenizer.chat_template:
             prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
@@ -235,7 +259,7 @@ def inference(config: Config):
         toploc_cache.maybe_generate_proofs_in_background(force_generate=True)
 
         # Compute progress metrics
-        batch_problems = len(batch)
+        batch_problems = len(problems)
         batch_samples = sum(len(req.outputs) for req in request_outputs)
         batch_input_tokens = sum(len(req.prompt_token_ids) for req in request_outputs)
         batch_output_tokens = sum(sum(len(output.token_ids) for output in req.outputs) for req in request_outputs)
@@ -256,7 +280,7 @@ def inference(config: Config):
         # Compute performance metrics
         batch_tokens_per_second = batch_tokens / (end_time - start_time)
         batch_samples_per_minute = batch_samples / (end_time - start_time) * 60
-        batch_avg_seq_length = batch_tokens / num_batch_samples
+        batch_avg_seq_length = batch_tokens / batch_size
         logger.info(
             f"Batch throughput: {batch_tokens_per_second:.2f} tokens/sec, {batch_samples_per_minute:.2f} samples/min ({batch_tokens} tokens in {end_time - start_time:.2f}s, avg seq len: {batch_avg_seq_length:.1f})"
         )

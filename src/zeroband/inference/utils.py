@@ -86,3 +86,32 @@ def filter_data_by_prompt_length(data: Dataset, max_length: int, tokenizer: Auto
     data = data.filter(lambda x: x["token_length"] <= max_length)
 
     return data
+
+
+def compute_max_batch_size(llm: LLM) -> int:
+    """
+    Automatically computes the maximum batch size (number of sequences decoded in
+    parallel) without exceeding the GPU memory to prevent cache eviction. We use vLLM's
+    cache config which gets populated when first initializing the LLM class. The two
+    important keys are `num_gpu_blocks` and `block_size`. The `block_size` is the number
+    of tokens that can be cached per GPU block. The `num_gpu_blocks` is the number of
+    GPU blocks that vLLM allocates in total. Hence, we can compute the total number of
+    tokens that can be cached by multiplying the  two. The maximum batch size is then
+    computed by dividing the total number of tokens that can be cached by the maximum
+    model length. This is a conservative estimate of the maximum batch size as it assumes
+    that all cached tokens are distinct (no cache hit) and all sequences reach the
+    maximum sequence length possible, here `max_model_len`.
+
+    Args:
+        llm (LLM): The vLLM LLM instance.
+
+    Returns:
+        int: The maximum batch size.
+    """
+    num_gpu_blocks = llm.llm_engine.model_executor.cache_config.num_gpu_blocks
+    block_size = llm.llm_engine.model_executor.cache_config.block_size
+    max_model_len = llm.llm_engine.model_config.max_model_len
+    max_cache_tokens = num_gpu_blocks * block_size
+    max_batch_size = max_cache_tokens // max_model_len
+
+    return max_batch_size
