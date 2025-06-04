@@ -78,9 +78,11 @@ def inference(config: Config):
     tokenizer = llm.get_tokenizer()
     sampling_params = SamplingParams(**config.sampling.model_dump())
 
-    # Setup and pipeline parallel hooks
-    node = setup_comm(config=config.pp)
-    setup_hooks(config=config.pp, llm=llm, node=node)
+    # Setup pipeline parallel communication
+    node = setup_comm(config.pp)
+
+    # Setup pipeline parallel hooks
+    setup_hooks(llm, config.pp, node)
 
     # Compute the maximum batch size
     batch_size = config.batch_size
