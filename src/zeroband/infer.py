@@ -164,7 +164,8 @@ def inference(config: Config):
         f"Problems per batch: {batch_size} // {config.sampling.n} = {problems_per_batch} (missing: {batch_size % config.sampling.n})"
     )
 
-    for i in range(0, config.max_samples or len(dataset), batch_size):
+    dataset_offset = 0
+    while True:
         if config.step_endpoint is not None:
             # We get the step from the endpoint at the start of each batch to know what to work on
             try:
@@ -209,7 +210,8 @@ def inference(config: Config):
             generator = np.random.default_rng(node_address_int * current_step_batch_counter + real_step)
             indices = generator.integers(0, len(dataset), problems_per_batch)
         else:
-            indices = list(range(i, min(i + problems_per_batch, len(dataset))))
+            # Use modulo to cycle through the dataset instead of terminating
+            indices = [(dataset_offset + j) % len(dataset) for j in range(problems_per_batch)]
 
         logger.debug(f"Sampling batch with indices [{' '.join(map(str, indices[:3]))}...{' '.join(map(str, indices[-3:]))}]")
         problems = dataset.select(indices)
@@ -335,6 +337,8 @@ def inference(config: Config):
         if config.total_step is not None and real_step > config.total_step:
             logger.info(f"Reached total step {config.total_step}, stopping inference")
             break
+
+        dataset_offset += batch_size
 
     logger.info(f"Inference finished! Generated {total_samples} samples for {total_problems} problems")
 
