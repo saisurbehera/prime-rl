@@ -3,8 +3,8 @@ import multiprocessing as mp
 import os
 import shutil
 import time
-import uuid
 from pathlib import Path
+import uuid
 
 # Import environment before any other imports
 # ruff: noqa: I001
@@ -26,6 +26,7 @@ from zeroband.inference.parquet import get_parquet_table
 from zeroband.inference.pipeline import all_reduce, patch_model_load, setup_comm, setup_hooks
 from zeroband.inference.rewards import compute_vllm_rewards
 from zeroband.inference.toploc import setup_toploc_cache
+from zeroband.inference.toploc2 import Toploc2Sampler
 from zeroband.utils.monitor import setup_monitor
 from zeroband.inference.utils import (
     filter_data_by_prompt_length,
@@ -81,7 +82,10 @@ def inference(config: Config):
         disable_async_output_proc=True,  # We have an off by 1 error in toploc without this flag when cuda graph padding is enabled.
         download_dir=config.download_dir,
         dtype="bfloat16" if config.dtype == "bf16" else torch.float32,
+        enable_chunked_prefill=False,  # This is required for toploc2 because chunked prefill seems to allow len(seq_groups) != len(selected_token_indices) which is unexpected
     )
+    if config.toploc2:
+        llm.llm_engine.model_executor.driver_worker.model_runner.sampler = Toploc2Sampler()
     tokenizer = llm.get_tokenizer()
 
     # Adjust sampling params based on config
@@ -220,6 +224,7 @@ def inference(config: Config):
             # This would work even if the node restarts and resumes from the current step.
             generator = np.random.default_rng(node_address_int * current_step_batch_counter + real_step)
             indices = generator.integers(0, len(dataset), problems_per_batch)
+            sampling_params.seed = int(generator.integers(2**32))
         else:
             # Use modulo to cycle through the dataset instead of terminating
             indices = [(dataset_offset + j) % len(dataset) for j in range(problems_per_batch)]
@@ -314,6 +319,11 @@ def inference(config: Config):
         monitor.log({"rewards/batch_rewards": batch_rewards})
         logger.info(f"Average reward of the batch: {batch_rewards}")
 
+        if sampling_params.seed is not None:
+            sampling_seeds = [sampling_params.seed + i for i in range(sampling_params.n)] * problems_per_batch
+        else:
+            sampling_seeds = [None] * batch_samples
+
         # Get parquet table
         table = get_parquet_table(
             request_outputs,
@@ -324,6 +334,7 @@ def inference(config: Config):
             target_lengths,
             problems,
             enable_logprobs=config.sampling.logprobs is not None,
+            seeds=sampling_seeds,
         )
 
         # Save outputs to parquet file
