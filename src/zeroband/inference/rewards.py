@@ -1,43 +1,48 @@
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Iterator, Literal, Sequence
+from typing import Annotated, Any, Iterator, Literal, Sequence
 
 import numpy as np
 import requests
-from pydantic import BaseModel
-from pydantic_config import BaseConfig
+from pydantic import BaseModel, Field
 from vllm import RequestOutput
 
 from zeroband.inference.genesys import TaskType, get_reward_function
+from zeroband.utils.config import BaseConfig
 from zeroband.utils.logger import get_logger
-
-# Global logger
-logger = get_logger("INFER")
 
 
 class LenRewardsConfig(BaseConfig):
-    reward_type: Literal["exact", "max", "clip"] = "max"
-    target_length_sampling: Literal["discrete", "range"] = "discrete"
-    length_prompt_location: Literal["system_prompt", "instruction"] = "system_prompt"
+    """Configures length reward."""
+
+    reward_type: Annotated[Literal["exact", "max", "clip"], Field(default="max")]
+    target_length_sampling: Annotated[Literal["discrete", "range"], Field(default="discrete")]
+    length_prompt_location: Annotated[Literal["system_prompt", "instruction"], Field(default="system_prompt")]
 
     # applicable if target_length_sampling == "range"
-    min_length: int = 1000
-    max_length: int = 24000
+    min_length: Annotated[int, Field(default=1000)]
+    max_length: Annotated[int, Field(default=24000)]
 
     # applicable if target_length_sampling == "discrete"
-    target_lengths: list[float] = [500, 1000, 2000, 3000]
+    target_lengths: Annotated[list[float], Field(default=[500, 1000, 2000, 3000])]
 
     # applicable for reward_type max and exact
-    reward_coef: float = 0.0003
+    reward_coef: Annotated[float, Field(default=0.0003)]
 
     # only applicable for reward_type == "max"
-    max_reward_delta: float = 0.5
+    max_reward_delta: Annotated[float, Field(default=0.5)]
 
 
 class RewardsConfig(BaseConfig):
-    len_reward: LenRewardsConfig | None = None
-    advantage_estimation_method: Literal["grpo", "dr_grpo", "opo"] = "grpo"
+    """Configures rewards compuation"""
+
+    len_reward: Annotated[LenRewardsConfig | None, Field(default=None)]
+    advantage_estimation_method: Annotated[Literal["grpo", "dr_grpo", "opo"], Field(default="grpo")]
+
+    def __str__(self) -> str:
+        len_reward_str = "disabled" if self.len_reward is None else self.len_reward
+        return f"len_reward={len_reward_str} advantage_estimation_method={self.advantage_estimation_method}"
 
 
 class ModelCompletion(BaseModel):
@@ -238,7 +243,7 @@ def compute_rewards(
         )
 
         if response.status_code != 200:
-            logger.error(f"Failed to compute rewards: {response.status_code} - {response.text}")
+            get_logger("INFER").error(f"Failed to compute rewards: {response.status_code} - {response.text}")
             raise RuntimeError(f"Failed to compute rewards: {response.status_code} - {response.text}")
         response = RewardsResponse.model_validate(json.loads(response.text))
         return response
