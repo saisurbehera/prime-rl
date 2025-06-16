@@ -35,7 +35,9 @@ dependencies = [
     "reasoning-gym @ git+https://github.com/open-thought/reasoning-gym.git",
     "tomli>=2.2.1",
     "pydantic-settings>=2.9.1",
-]
+    "cydifflib>=1.2.0",
+] 
+
 
 [project.optional-dependencies]
 fa = ["flash-attn>=2.7.4"]
