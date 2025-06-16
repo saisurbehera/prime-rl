@@ -1,0 +1,8 @@
+model_name = "deepseek-ai/deepseek-coder-6.7b-instruct"
+dataset = "data/swe_bench/swe_bench_prompts.jsonl"
+batch_size = 1
+dp = 4
+rollout_path = "swe_bench_output"
+output_path = "data_rollout_swe_bench"
+clean_output_path = true
+max_model_len = 8192

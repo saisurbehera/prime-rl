@@ -74,7 +74,7 @@ def _compute_completion_reward(
     # Compute length penalty
     reward = task_reward
     length_penalty = 0
-    target_length = verification_info["target_length"]
+    target_length = verification_info.get("target_length", 0)
     if target_length > 0:
         output_length = len(completion_output.token_ids)
         # Penalizes absolute deviation from target length

@@ -161,7 +161,7 @@ class MetricsAverager:
     """
 
     def __init__(self):
-        self.metrics = {}
+        self._metrics = {}
         self.count = {}
         self.world_info = get_world_info()
 
@@ -174,17 +174,17 @@ class MetricsAverager:
                 self._update(key, v)
 
     def _update(self, key, value: torch.Tensor):
-        if key not in self.metrics:
-            self.metrics[key] = value
+        if key not in self._metrics:
+            self._metrics[key] = value
             self.count[key] = 1
         else:
-            self.metrics[key] += value
+            self._metrics[key] += value
             self.count[key] += 1
 
     @torch.no_grad()
     def sync(self):
-        for key in self.metrics:
-            value = self.metrics[key].clone()
+        for key in self._metrics:
+            value = self._metrics[key].clone()
             count = torch.tensor(self.count[key])
 
             dist.all_reduce(value.to("cuda"), op=dist.ReduceOp.SUM)
@@ -192,13 +192,16 @@ class MetricsAverager:
 
             value = value / count
 
-            self.metrics[key] = value
+            self._metrics[key] = value
 
     def __getitem__(self, key):
-        return self.metrics[key]
+        return self._metrics[key]
 
     def items(self):
-        return self.metrics.items()
+        return self._metrics.items()
+    
+    def metrics(self):
+        return self._metrics
 
 
 def get_real_tensor(tensor: torch.Tensor | DTensor):

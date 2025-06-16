@@ -31,14 +31,13 @@ proof_uncertainty_threshold = 0.2
 reflective_uncertainty_threshold = 0.3
 
 # Weight execution and proof oracles more heavily for SWE-bench
-oracle_weights = {
-    execution = 0.3,     # High weight for test execution
-    static_analysis = 0.15,
-    complexity = 0.1,
-    documentation = 0.1,
-    proof = 0.25,        # High weight for formal correctness
-    reflective = 0.1
-}
+[oracle_config.oracle_weights]
+execution = 0.3         # High weight for test execution
+static_analysis = 0.15
+complexity = 0.1
+documentation = 0.1
+proof = 0.25           # High weight for formal correctness
+reflective = 0.1
 
 # Repository analysis settings
 enable_repo_context = true

@@ -24,24 +24,43 @@ class SWEBenchInstance:
     PASS_TO_PASS: List[str]
 
 def download_swe_bench_verified():
-    """Download SWE-bench Verified dataset."""
-    print("Downloading SWE-bench Verified dataset...")
+    """Download SWE-bench Verified dataset from Hugging Face."""
+    print("Downloading SWE-bench Verified dataset from Hugging Face...")
     
     # Create data directory
     data_dir = Path("data/swe_bench")
     data_dir.mkdir(parents=True, exist_ok=True)
     
-    # Download verified dataset
-    verified_url = "https://github.com/princeton-nlp/SWE-bench/raw/main/swe_bench/collect/tasks/swe-bench-verified.json"
     verified_path = data_dir / "swe_bench_verified.json"
     
     if not verified_path.exists():
-        response = requests.get(verified_url)
-        response.raise_for_status()
+        # Import datasets library
+        from datasets import load_dataset
+        
+        # Load from Hugging Face
+        dataset = load_dataset('princeton-nlp/SWE-bench_Verified', split='test')
+        
+        # Convert to list of dicts and save
+        data = []
+        for item in dataset:
+            data.append({
+                'instance_id': item['instance_id'],
+                'repo': item['repo'],
+                'base_commit': item['base_commit'],
+                'patch': item['patch'],
+                'test_patch': item['test_patch'],
+                'problem_statement': item['problem_statement'],
+                'hints_text': item.get('hints_text', ''),
+                'created_at': item['created_at'],
+                'version': item['version'],
+                'FAIL_TO_PASS': item['FAIL_TO_PASS'],
+                'PASS_TO_PASS': item['PASS_TO_PASS']
+            })
         
         with open(verified_path, 'w') as f:
-            f.write(response.text)
-        print(f"Downloaded SWE-bench Verified to {verified_path}")
+            json.dump(data, f, indent=2)
+        
+        print(f"Downloaded {len(data)} SWE-bench Verified instances to {verified_path}")
     else:
         print(f"SWE-bench Verified already exists at {verified_path}")
     

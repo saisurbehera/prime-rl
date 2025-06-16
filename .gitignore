@@ -1,3 +1,6 @@
+swe_bench_rollouts/
+swe_bench_outputs/
+
 .vscode/*
 logs/*
 wandb/*
