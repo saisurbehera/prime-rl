@@ -3,6 +3,7 @@ from typing import Annotated, Literal, TypeAlias, Union
 from pydantic import Field, model_validator
 
 from zeroband.utils.config import MultiMonitorConfig
+from zeroband.utils.logger import get_logger
 from zeroband.utils.models import AttnImpl
 from zeroband.utils.pydantic_config import BaseConfig, BaseSettings
 
@@ -26,6 +27,14 @@ class OptimConfig(BaseConfig):
     batch_size: Annotated[int, Field(default=512)]
     grad_norm_clip: Annotated[float, Field(default=1.0)]
     step_per_rollout: Annotated[int, Field(default=1)]
+
+    @model_validator(mode="after")
+    def warn_step_per_rollout(self):
+        if self.step_per_rollout > 1:
+            get_logger("TRAIN").info(
+                f"step_per_rollout is set to {self.step_per_rollout}. The recommended value is 1, any other value should be either to run a legacy run or a experiment.."
+            )
+        return self
 
 
 class TrainConfig(BaseConfig):
@@ -97,7 +106,7 @@ class GRPOLossConfig(BaseConfig):
     off_policy: GRPOVariantsConfig = ClippingConfig()
 
     kl_coef: Annotated[float | None, Field(default=None)]
-    entropy_loss_coeff: Annotated[float, Field(default=0.001)]
+    entropy_loss_coeff: Annotated[float, Field(default=0)]
 
 
 class ModelConfig(BaseConfig):
@@ -154,8 +163,6 @@ class Config(BaseSettings):
 
     gpus_ids: Annotated[list[int] | None, Field(default=None)]
 
-    temperature: Annotated[float, Field(default=0.6, ge=0)]
-
     async_level: Annotated[int, Field(default=2, ge=1)]
 
     collate_mode: Annotated[CollateMode, Field(default="padding")]
@@ -168,7 +175,7 @@ class Config(BaseSettings):
 
     stop_after_steps: Annotated[int | None, Field(default=None)]
 
-    normalize_batch_to_token_count: Annotated[bool, Field(default=False)]
+    normalize_batch_to_token_count: Annotated[bool, Field(default=True)]
 
     recompute_logprobs: Annotated[bool, Field(default=True)]
 
