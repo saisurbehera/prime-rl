@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -333,6 +332,27 @@ class TopLocConfig(BaseConfig):
     enable_toploc2: Annotated[bool, Field(default=False, description="Whether to use the toploc2 sampler.")]
 
 
+class LogConfig(BaseConfig):
+    """Configures the logger."""
+
+    level: Annotated[
+        Literal["debug", "info"],
+        Field(default="info", description="Logging level for the inference run. Will determine the logging verbosity and format."),
+    ]
+
+    all_ranks: Annotated[
+        bool, Field(default=False, description="Whether to log from all DP ranks. If False, will only log from the main rank (DP rank 0).")
+    ]
+
+    utc: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="Whether to use UTC time in the logger. If False, it will default to the local time. If the local time is wrong, you can set it by setting the `TZ` environment variable. For example, `TZ=America/Los_Angeles` will set the local time to SF time.",
+        ),
+    ]
+
+
 class Config(BaseSettings):
     """Configures inference."""
 
@@ -353,6 +373,9 @@ class Config(BaseSettings):
 
     # The monitor configuration
     monitor: Annotated[MultiMonitorConfig, Field(default=MultiMonitorConfig())]
+
+    # The logging configuration
+    log: Annotated[LogConfig, Field(default=LogConfig())]
 
     # The RL configuration. If None, inference will run in a non-RL setting.
     rl: Annotated[RLConfig | None, Field(default=RLConfig())]
@@ -408,14 +431,6 @@ class Config(BaseSettings):
         ),
     ]
 
-    log_level: Annotated[
-        Literal["debug", "info", "warning", "critical"],
-        Field(
-            default="info",
-            description="Logging level for the inference run.",
-        ),
-    ]
-
     task_id: Annotated[
         str | None,
         Field(
@@ -439,11 +454,6 @@ class Config(BaseSettings):
             description="Path to file to write the current inference step to. Used in production by protocol worker for restarting a task after re-grouping. The file will be automatically created and and only contain a single integer.",
         ),
     ]
-
-    @model_validator(mode="after")
-    def set_log_level(self):
-        os.environ["PRIME_LOG_LEVEL"] = self.log_level
-        return self
 
     @model_validator(mode="after")
     def enforce_eager_for_pp(self):

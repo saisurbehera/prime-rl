@@ -36,17 +36,16 @@ from zeroband.inference.utils import (
     format_prompts,
 )
 from zeroband.training.mp import EnvWrapper
-from zeroband.utils.logger import get_logger
 from zeroband.utils.utils import ensure_process_group_cleanup
+from zeroband.inference.logger import setup_logger
 
 
 @ensure_process_group_cleanup
 def inference(config: InferenceConfig):
     # Initialize the logger
-    logger = get_logger("INFER")
+    dp_rank = int(os.environ.get("DP_RANK", 0))
+    logger = setup_logger(config.log, parallel_config=config.parallel, dp_rank=dp_rank)
     logger.info("Starting inference")
-    logger.info(f"Log level: {config.log_level}")
-    logger.info(f"Parallelism: TP={config.parallel.tp} DP={config.parallel.dp} PP={config.parallel.pp.world_size}")
 
     # Optionally, clean the rollout path
     if config.clean_rollout_path and config.rollout_path is not None:
@@ -57,7 +56,7 @@ def inference(config: InferenceConfig):
     logger.info(f"Downloading model weights for {config.model.name}")
     start_time = time.time()
     snapshot_download(config.model.name)
-    logger.info(f"Downloaded model weights in {time.time() - start_time:.2f}s")
+    logger.success(f"Downloaded model weights in {time.time() - start_time:.2f}s")
 
     # Initialize metrics
     monitor = setup_monitor(config.monitor, config.task_id)
@@ -85,7 +84,7 @@ def inference(config: InferenceConfig):
     if config.toploc.enable_toploc2:
         llm.llm_engine.model_executor.driver_worker.model_runner.sampler = Toploc2Sampler()
     tokenizer = llm.get_tokenizer()
-    logger.info(f"Initialized model and tokenizer in {time.time() - start_time:.2f}s")
+    logger.success(f"Initialized model and tokenizer in {time.time() - start_time:.2f}s")
 
     # Initialize dataset
     logger.info(f"Initializing dataset (name={config.data.name}, split={config.data.split})")
@@ -94,15 +93,15 @@ def inference(config: InferenceConfig):
 
     if not config.rewards.compute_reward:
         logger.info("Reward computation is disabled, setting task_type to null_reward")
-        dataset = dataset.map(lambda x: {"task_type": "null_reward"})
+        dataset = dataset.map(lambda _: {"task_type": "null_reward"})
 
-    logger.info(f"Initialized dataset with {len(dataset):,} problems in {time.time() - start_time:.2f}s")
+    logger.success(f"Initialized dataset with {len(dataset):,} problems in {time.time() - start_time:.2f}s")
 
     # Optionally shuffle dataset
     if config.group_id is not None:
         # We dont shuffle here because we shuffle reproducibly in the sampling loop.
-        assert config.seed is None, "Seed is not supported when PRIME_GROUP_ID is set"
-        assert os.environ.get("DP_RANK") is None, "DP is not supported when group ID is set"
+        assert config.seed is None, "Seed is not supported when group ID is set"
+        assert config.parallel.dp == 1, "DP is not supported when group ID is set"
         node_address_int = int(config.group_id, 16)
         logger.info(f"Seeding with {node_address_int} ({config.group_id})")
     else:
@@ -118,20 +117,16 @@ def inference(config: InferenceConfig):
         logger.info(f"Filtering out prompts with more than {config.data.max_prompt_len} tokens")
         start_time = time.time()
         dataset = filter_data_by_prompt_length(dataset, config.data.max_prompt_len, tokenizer)
-        logger.info(f"Filtered long prompts in {time.time() - start_time:.2f}s - {len(dataset)} samples remaining")
+        logger.success(f"Filtered long prompts in {time.time() - start_time:.2f}s - {len(dataset)} samples remaining")
 
     # Optionally, filter dataset for samples within difficulty range
     if config.data.difficulty_filtering:
         logger.info(
             f"Filtering dataset for difficulty in [{config.data.difficulty_filtering.min_solve_rate}, {config.data.difficulty_filtering.max_solve_rate}]"
         )
-        start_time = time.time()
         dataset = dataset.filter(
             lambda x: x[config.data.difficulty_filtering.solve_rate_field] >= config.data.difficulty_filtering.min_solve_rate
             and x[config.data.difficulty_filtering.solve_rate_field] <= config.data.difficulty_filtering.max_solve_rate
-        )
-        logger.info(
-            f"Filtered dataset for difficulty in [{config.data.difficulty_filtering.min_solve_rate}, {config.data.difficulty_filtering.max_solve_rate}] in {time.time() - start_time:.2f}s - {len(dataset)} samples remaining"
         )
 
     # Initialize sampling parameters
@@ -150,7 +145,7 @@ def inference(config: InferenceConfig):
         local_max_batch_size = compute_max_batch_size(llm)
         max_batch_size = all_reduce(node, torch.tensor(local_max_batch_size), config=config.parallel.pp, op=torch.min).item()
 
-    logger.info(f"Maximum batch size: {max_batch_size}")
+    logger.info(f"Using maximum batch size: {max_batch_size}")
 
     # Throw an error if the batch cannot fit number of samples to generate per problem.
     # TODO(Mika): Circumvent this assertion by distribtuting parallel samples across multiple batches
@@ -233,7 +228,7 @@ def inference(config: InferenceConfig):
                     llm = reload_model_weights(llm, Path(config.rl.ckpt_path) / f"step_{ckpt_step}/model.safetensors")
                     total_problems = 0
                     total_tokens = 0
-                    logger.info(f"Reloaded model weights for step {ckpt_step} from {stable_file}")
+                    logger.success(f"Reloaded model weights for step {ckpt_step} from {stable_file}")
                     break
                 if attempt_count % 30 == 0:
                     logger.info(f"No stable file found at {stable_file}, waiting for new checkpoint")
@@ -241,10 +236,10 @@ def inference(config: InferenceConfig):
                 attempt_count += 1
 
         if config.step_path is not None:
+            logger.info(f"Writing current inference step ({real_step}) to {config.step_path}")
             if not config.step_path.exists():
                 config.step_path.parent.mkdir(parents=True, exist_ok=True)
             config.step_path.write_text(str(real_step))
-            logger.info(f"Wrote current inference step ({real_step}) to {config.step_path}")
 
         # Get batch
         if node_address_int is not None:
@@ -284,6 +279,7 @@ def inference(config: InferenceConfig):
         # Convert BatchEncoding to TokensPrompt objects
         token_prompts = [TokensPrompt(prompt_token_ids=input_ids) for input_ids in tokenized_prompts]
 
+        logger.info(f"Generating {len(token_prompts)} samples for {len(problems)} problems")
         start_time = time.time()
         request_outputs = llm.generate(token_prompts, sampling_params, use_tqdm=False)
         end_time = time.time()
@@ -306,12 +302,12 @@ def inference(config: InferenceConfig):
         total_tokens += batch_tokens
         total_problems += batch_problems
         total_samples += batch_samples
-        logger.info(f"Generated {batch_samples} samples for {batch_problems} problems for step {real_step} in {end_time - start_time:.2f}s")
+        logger.success(f"Generated {batch_samples} samples for {batch_problems} problems in {end_time - start_time:.2f}s")
 
         # Print example
         first_prompt = tokenizer.decode(request_outputs[0].prompt_token_ids)
         first_completion = tokenizer.decode(request_outputs[0].outputs[0].token_ids)
-        logger.debug(f"Example: {first_prompt}{first_completion}")
+        logger.debug(f"Showing example (first completion):\n{first_prompt}{first_completion}")
 
         # Log progress metrics
         progress_metrics = {
@@ -345,15 +341,12 @@ def inference(config: InferenceConfig):
         proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
         toploc_cache.reset_cache()
 
-        # Compute rewards and advantages
-        start = time.time()
+        # Compute and log rewards and advantages
+        logger.info("Computing rewards and advantages")
         request_rewards = compute_vllm_rewards(request_outputs, verification_infos, task_types, config.rewards)
-        logger.info(f"Computed rewards and advantages in {time.time() - start:.2f}s")
-
         batch_rewards = sum(sum(r.reward for r in req.rewards) for req in request_rewards) / batch_samples
-
+        logger.info(f"Average reward of the batch: {batch_rewards:.2f}")
         monitor.log({"rewards/batch_rewards": batch_rewards})
-        logger.info(f"Average reward of the batch: {batch_rewards}")
 
         if sampling_params.seed is not None:
             sampling_seeds = [sampling_params.seed + i for i in range(sampling_params.n)] * problems_per_batch
@@ -378,8 +371,8 @@ def inference(config: InferenceConfig):
         step_path = Path(config.rollout_path) / f"step_{real_step}"
         step_path.mkdir(parents=True, exist_ok=True)
         save_path = step_path / f"{uuid.uuid4()}.parquet"
+        logger.info(f"Saving batch outputs to {save_path}")
         pq.write_table(table, save_path)
-        logger.info(f"Saved batch outputs to {save_path}")
 
         # Log file metadata
         sha256 = sha256sum(save_path)
@@ -405,7 +398,7 @@ def inference(config: InferenceConfig):
 
         dataset_offset += problems_per_batch
 
-    logger.info(f"Inference finished! Generated {total_samples} samples for {total_problems} problems")
+    logger.success(f"Inference finished! Generated {total_samples} samples for {total_problems} problems")
 
 
 def main(config: InferenceConfig) -> list[mp.Process]:

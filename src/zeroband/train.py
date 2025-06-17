@@ -20,6 +20,7 @@ from zeroband.training import envs
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.config import Config as TrainingConfig
 from zeroband.training.data import BatchOutput, DatasetOutput, get_dataloader, packed_batch
+from zeroband.training.logger import setup_logger
 from zeroband.training.loss import entropy_loss, grpo_loss, kl_penalty, selective_log_softmax
 from zeroband.training.utils import (
     MetricsAverager,
@@ -34,7 +35,6 @@ from zeroband.training.utils import (
     wake_up_model_from_cpu,
 )
 from zeroband.training.world_info import WorldInfo, get_world_info
-from zeroband.utils.logger import get_logger
 from zeroband.utils.models import ModelType, get_model_and_tokenizer
 from zeroband.utils.monitor import setup_monitor
 from zeroband.utils.pydantic_config import parse_argv
@@ -91,8 +91,8 @@ def train(config: TrainingConfig):
     if "ZERO_BAND_DEV" not in os.environ:
         torch_log.setLevel(logging.CRITICAL)
 
-    logger = get_logger("TRAIN")
     world_info = get_world_info()
+    logger = setup_logger(config.log, world_info)
     wandb_sample_history = None
 
     if config.ckpt.clean_rollout_path and config.ckpt.rollout_path is not None:
@@ -516,7 +516,7 @@ def train(config: TrainingConfig):
             tensor_offloaded_repository[training_progress.step // config.optim.step_per_rollout] = copy_model_to_cpu(model)
 
         time_rollout_step = time.time() - time_start
-        logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
+        logger.success(f"Finished training step {training_progress.step} in {time_rollout_step:.2f}s")
         if world_info.rank == 0 and config.wandb:
             new_metrics = {
                 "rollout_step": rollout_step,
@@ -534,8 +534,8 @@ def train(config: TrainingConfig):
     if prefetcher is not None:
         prefetcher.shutdown()
 
-    logger.info("Training finished, exiting ...")
-    logger.info(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+    logger.info(f"Peak memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+    logger.success("Training finished!")
 
 
 if __name__ == "__main__":

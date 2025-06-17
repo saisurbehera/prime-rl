@@ -91,7 +91,7 @@ def _get_dataset_from_files_step(
     step_count: int, path: Path, timeout: float, batch_size: int, ignore_zero_advantages: bool, use_stable_file: bool
 ) -> ds.Dataset:
     """Get all the files for a given step. Waits until the step is created which is indicated by the stable file."""
-    logger = get_logger("TRAIN")
+    logger = get_logger()
     step_path = path / f"step_{step_count}"
 
     start_time = time.time()
@@ -201,7 +201,7 @@ class ParquetDataset(IterableDataset):
         use_stable_file: bool = False,
         use_vllm_logprobs: bool = False,
     ):
-        self._logger = get_logger("TRAIN")
+        self._logger = get_logger()
         self._path = path
         self._batch_size = batch_size
         self._pq_read_bs = pq_read_bs
@@ -235,7 +235,7 @@ class ParquetDataset(IterableDataset):
 
             sample_count = 0
 
-            self._logger.debug(msg=f"data: Processing step {self._step_count}")
+            self._logger.debug(f"Data processing step {self._step_count}")
 
             dataset = _get_dataset_from_files_step(
                 self._step_count, self._path, self._timeout, self._batch_size, self._ignore_zero_advantages, self._use_stable_file
