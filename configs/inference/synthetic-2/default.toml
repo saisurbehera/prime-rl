@@ -1,7 +1,8 @@
 rollout_path = "/data"
-toploc = true
-
 rl = "None"
+
+[toploc]
+enable_toploc1 = true
 
 [parallel]
 tp = "auto"
