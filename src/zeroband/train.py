@@ -428,7 +428,6 @@ def train(config: TrainingConfig):
             padding_proportion = (config.data.seq_length - metric_averager["lengths/seq_lens"].item() - 1) / config.data.seq_length
 
             metrics = {
-                "step": training_progress.step,
                 "losses/Loss": loss_batch.item(),
                 "train/rollout_step": rollout_step,
                 "train/inner_lr": inner_lr,
@@ -527,8 +526,8 @@ def train(config: TrainingConfig):
                 "perf/time_logprob": total_time_logprob,
                 "perf/time_data_loading": total_time_data_loading,
                 "perf/time_packing": total_time_packing,
-                "time_data_preprocessing": total_time,
-                "time_rollout_delete": time_rollout_delete,
+                "perf/time_data_preprocessing": total_time,
+                "perf/time_rollout_delete": time_rollout_delete,
             }
             if time_rollout_ckpt is not None:
                 time_metrics["perf/time_rollout_ckpt"] = time_rollout_ckpt
