@@ -20,10 +20,11 @@ import requests
 import torch
 from datasets import load_dataset
 from toploc.utils import sha256sum
-from vllm import LLM, SamplingParams, TokensPrompt
+from vllm import SamplingParams, TokensPrompt
 from huggingface_hub import snapshot_download
 
 from zeroband.utils.pydantic_config import parse_argv
+from zeroband.eval.utils import run_benchmark
 from zeroband.inference.config import Config as InferenceConfig
 from zeroband.inference.parquet import get_parquet_table
 from zeroband.inference.pipeline import all_reduce, patch_model_load, setup_comm, setup_hooks
@@ -32,7 +33,9 @@ from zeroband.inference.toploc import setup_toploc_cache
 from zeroband.inference.toploc2 import Toploc2Sampler
 from zeroband.utils.monitor import setup_monitor
 from zeroband.inference.utils import (
+    setup_model,
     filter_data_by_prompt_length,
+    reload_checkpoint,
     reload_model_weights,
     compute_max_batch_size,
     get_inference_input_output_flops,
@@ -71,24 +74,13 @@ def inference(config: InferenceConfig):
     # Initialize model and tokenizer
     logger.info(f"Initializing model and tokenizer ({config.model} tensor_parallel_size={config.parallel.tp} seed={config.seed})")
     start_time = time.time()
-    llm = LLM(
-        model=config.model.name,
-        dtype=config.model.dtype,
-        kv_cache_dtype=config.model.kv_cache_dtype,
-        max_model_len=config.model.max_model_len,
-        quantization=config.model.quantization,
-        enforce_eager=config.model.enforce_eager,
-        device=config.model.device,
-        tensor_parallel_size=config.parallel.tp,
-        disable_async_output_proc=True,  # We have an off by 1 error in toploc without this flag when cuda graph padding is enabled.
-        enable_chunked_prefill=False,  # This is required for toploc2 because chunked prefill seems to allow len(seq_groups) != len(selected_token_indices) which is unexpected
-        seed=config.seed,
-    )
+    llm = setup_model(config.model, tp=config.parallel.tp, seed=config.seed)
+    tokenizer = llm.get_tokenizer()
+    logger.success(f"Initialized model and tokenizer in {time.time() - start_time:.2f}s")
+
     if config.toploc.enable_toploc2:
         llm.llm_engine.model_executor.driver_worker.model_runner.sampler = Toploc2Sampler()
         logger.info("Using toploc2 sampler")
-    tokenizer = llm.get_tokenizer()
-    logger.success(f"Initialized model and tokenizer in {time.time() - start_time:.2f}s")
 
     # Initialize dataset
     logger.info(f"Initializing dataset (name={config.data.name}, split={config.data.split})")
@@ -178,7 +170,7 @@ def inference(config: InferenceConfig):
     )
 
     ckpt_step = 0
-    real_step = config.start_step
+    step = config.start_step
     if config.rl and config.rl.ckpt_start_path is not None:
         logger.info(f"Resuming from checkpoint {config.rl.ckpt_start_path}")
         path = Path(config.rl.ckpt_start_path)
@@ -188,15 +180,15 @@ def inference(config: InferenceConfig):
         ckpt_step = int(path.name.split("_")[-1])
         logger.info(f"Resuming from step {ckpt_step} at {path_file}")
         llm = reload_model_weights(llm, path_file)
-        real_step = ckpt_step
+        step = ckpt_step
 
     # Check if we should resume from step_path file
     if config.step_path is not None and config.step_path.exists():
         try:
             saved_step = int(config.step_path.read_text().strip())
             logger.info(f"Found existing step file at {config.step_path} with step {saved_step}")
-            real_step = saved_step
-            logger.info(f"Resuming from step {real_step} (loaded from {config.step_path})")
+            step = saved_step
+            logger.info(f"Resuming from step {step} (loaded from {config.step_path})")
         except (ValueError, IOError) as e:
             logger.warning(f"Failed to read step from {config.step_path}: {e}")
 
@@ -205,64 +197,71 @@ def inference(config: InferenceConfig):
     total_problems = 0
     total_samples = 0
     total_tokens = 0
+    last_eval_step = -1
 
     dataset_offset = 0
     while True:
         if config.rl and config.rl.step_endpoint is not None:
             # We get the step from the endpoint at the start of each batch to know what to work on
             try:
-                new_real_step = requests.get(config.rl.step_endpoint).json()
+                new_step = requests.get(config.rl.step_endpoint).json()
             except Exception as e:
                 logger.warning(f"Failed to get step from endpoint {config.rl.step_endpoint}: {e}")
                 time.sleep(10)
                 continue
 
-            if new_real_step != real_step:
-                real_step = new_real_step
+            if new_step != step:
+                step = new_step
                 current_step_batch_counter = 1
             else:
                 current_step_batch_counter += 1
 
-        logger.info(f"Inference step {real_step} (Checkpoint step: {ckpt_step})")
-        if config.rl and real_step - ckpt_step > config.rl.async_level:
-            logger.info(f"Required to reload model weights for step {ckpt_step} from {config.rl.ckpt_path}")
-            ckpt_step = real_step - config.rl.async_level
-            attempt_count = 0
-            while True:
-                stable_file = Path(config.rl.ckpt_path) / f"step_{ckpt_step}/stable"
-                if stable_file.exists():
-                    logger.info(f"Reloading model weights for step {ckpt_step} from {stable_file}")
-                    llm = reload_model_weights(llm, Path(config.rl.ckpt_path) / f"step_{ckpt_step}/model.safetensors")
-                    total_problems = 0
-                    total_tokens = 0
-                    logger.success(f"Reloaded model weights for step {ckpt_step} from {stable_file}")
-                    break
-                if attempt_count % 30 == 0:
-                    logger.info(f"No stable file found at {stable_file}, waiting for new checkpoint")
-                time.sleep(1)
-                attempt_count += 1
+        logger.info(f"Inference step {step} (Checkpoint step: {ckpt_step})")
 
+        # Reload model weights from checkpoint if we are too far ahead of the checkpoint step
+        if config.rl and step - ckpt_step > config.rl.async_level:
+            logger.warning(
+                f"Hit async level ({config.rl.async_level}) because inference step {step} is {step - ckpt_step} steps ahead of checkpoint step {ckpt_step}. Trying to reload model weights from {config.rl.ckpt_path}"
+            )
+            ckpt_step = step - config.rl.async_level
+            llm = reload_checkpoint(llm, config.rl.ckpt_path, ckpt_step)
+
+        # Optionally, run online evals at the specified interval
+        if (
+            config.rl
+            and dp_rank == 0
+            and config.eval
+            and config.eval.online
+            and ckpt_step % config.eval.online.interval == 0
+            and ckpt_step > last_eval_step
+        ):
+            last_eval_step = ckpt_step
+            logger.info(f"Running evals for checkpoint step {ckpt_step}")
+            for benchmark in config.eval.benchmarks:
+                run_benchmark(llm, benchmark, config.model, config.sampling, ckpt_step, seed=config.seed, use_tqdm=config.use_tqdm)
+
+        # Write the current step to a file, this is required for resuming tasks in production but can be ignored for local runs
         if config.step_path is not None:
-            logger.info(f"Writing current inference step ({real_step}) to {config.step_path}")
+            logger.info(f"Writing current inference step ({step}) to {config.step_path}")
             if not config.step_path.exists():
                 config.step_path.parent.mkdir(parents=True, exist_ok=True)
-            config.step_path.write_text(str(real_step))
+            config.step_path.write_text(str(step))
 
         # Get batch
         if node_address_int is not None:
-            # TODO: What if we have multiple sample per real step?
+            # TODO: What if we have multiple sample per step?
             # Its impossible right now but we need to fix this if accept counter is used.
 
             # We reseed the generator here to make the sampling reproducible at each step.
             # This would work even if the node restarts and resumes from the current step.
-            generator = np.random.default_rng(node_address_int * current_step_batch_counter + real_step)
+            generator = np.random.default_rng(node_address_int * current_step_batch_counter + step)
             indices = generator.integers(0, len(dataset), problems_per_batch)
             sampling_params.seed = int(generator.integers(2**32))
         else:
             # Use modulo to cycle through the dataset instead of terminating
             indices = [(dataset_offset + j) % len(dataset) for j in range(problems_per_batch)]
             if seed is not None:
-                sampling_params.seed = seed + real_step * 1_000_000  # 1M is needed to avoid collision from sampling.n
+                sampling_params.seed = seed + step * 1_000_000  # 1M is needed to avoid collision from sampling.n
 
         logger.debug(f"Sampling batch with indices [{' '.join(map(str, indices[:3]))}...{' '.join(map(str, indices[-3:]))}]")
         problems = dataset.select(indices)
@@ -444,9 +443,10 @@ def inference(config: InferenceConfig):
             "progress/batch_problems": batch_problems,
             "progress/batch_samples": batch_samples,
             "progress/batch_tokens": batch_tokens,
-            "step": real_step,
+            "progress/step": step,
+            "step": ckpt_step,  # We use the train step to synchronize the wandb axis across runs
         }
-        monitor.log(progress_metrics)
+        monitor.log(progress_metrics, wandb_prefix="infer")
 
         # Compute performance metrics
         batch_tokens_per_second = batch_tokens / generation_time
@@ -461,16 +461,17 @@ def inference(config: InferenceConfig):
             "performance/batch_tokens_per_second": batch_tokens_per_second,
             "performance/batch_samples_per_minute": batch_samples_per_minute,
             "performance/batch_avg_seq_length": batch_avg_seq_length,
-            "step": real_step,
+            "step": ckpt_step,
         }
-        monitor.log(perf_metrics)
+        monitor.log(perf_metrics, wandb_prefix="infer")
 
         # Compute and log rewards and advantages
         logger.info("Computing rewards and advantages")
         request_rewards = compute_vllm_rewards(request_outputs, verification_infos, task_types, config.rewards)
-        batch_rewards = sum(sum(r.reward for r in req.rewards) for req in request_rewards) / batch_samples
-        logger.info(f"Average reward of the batch: {batch_rewards:.2f}")
-        monitor.log({"rewards/batch_rewards": batch_rewards, "step": real_step})
+        batch_reward = sum(sum(r.reward for r in req.rewards) for req in request_rewards) / batch_samples
+        logger.info(f"Average reward of the batch: {batch_reward:.2f}")
+        rewards_metrics = {"rewards/batch_reward": batch_reward, "step": ckpt_step}
+        monitor.log(rewards_metrics, wandb_prefix="infer")
 
         if sampling_params.seed is not None:
             sampling_seeds = [sampling_params.seed + i for i in range(sampling_params.n)] * problems_per_batch
@@ -492,7 +493,7 @@ def inference(config: InferenceConfig):
         )
 
         # Save outputs to parquet file
-        step_path = Path(config.rollout_path) / f"step_{real_step}"
+        step_path = Path(config.rollout_path) / f"step_{step}"
         step_path.mkdir(parents=True, exist_ok=True)
         save_path = step_path / f"{uuid.uuid4()}.parquet"
         logger.info(f"Saving batch outputs to {save_path}")
@@ -510,13 +511,13 @@ def inference(config: InferenceConfig):
             "output/input_flops": sum(input_flops for input_flops, _ in flop_counts) // config.parallel.pp.world_size,
             "output/save_path": save_path.as_posix(),
             "output/sha256": sha256,
-            "output/step": real_step,
+            "output/step": step,
         }
         monitor.log(work_submission, exclude=["wandb"])
 
-        real_step += 1
+        step += 1
 
-        if config.max_steps is not None and real_step > config.max_steps:
+        if config.max_steps is not None and step > config.max_steps:
             logger.info(f"Reached max steps {config.max_steps}, stopping inference")
             break
 
